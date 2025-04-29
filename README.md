@@ -4,7 +4,7 @@ This repository provides a suite of scripts to evaluate various models on cell i
 
 ## Abstract
 
-![Abstract Diagram](./Image/Abstract.svg)
+![Abstract Diagram](./Images/Abstract.svg)
 
 We benchmark the performance of several approaches on structured cell imaging datasets:
 
