@@ -19,11 +19,13 @@ from sklearn.metrics import (
 )
 import pandas as pd
 
+# REQUIRES THIS SCRIPT TO BE INSIDE THE LLAVA MED OFFICIAL REPO CLONE
+
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
 MODEL_PATH  = "microsoft/llava-med-v1.5-mistral-7b"
 CONV_MODE   = "vicuna_v1"
-DATA_ROOT   = "./Data"      # root folder with Dataset1, Dataset2, …
-OUTPUT_DIR  = "./results"      # where CSVs go
+DATA_ROOT   = r"C:\Users\samar\Documents\CVPR\Data"      # root folder with Dataset1, Dataset2, …
+OUTPUT_DIR  = "./"      # where CSVs go
 SHOT        = 1                # 0 = zero-shot, >0 = one-shot
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -42,7 +44,6 @@ conv_template = conv_templates[CONV_MODE]
 
 # ─── HELPERS ────────────────────────────────────────────────────────────────────
 def build_shot_prompt(class_labels):
-    """Return the raw text prompt with IMAGE tokens inserted."""
     lines = []
     if SHOT > 0:
         lines.append("Here are reference images—one shot per class:")
@@ -64,25 +65,22 @@ def build_shot_prompt(class_labels):
     return "\n".join(lines)
 
 def summarize_prompt(txt):
-    """Hide actual tokens so you only see the text structure."""
     return txt.replace(DEFAULT_IMAGE_TOKEN, "[IMAGE]")
 
 def extract_prediction(resp_text, class_labels):
-    """Find the longest matching class label, else fallback."""
-    lower = resp_text.lower()
+    txt = resp_text.lower()
     for cls in sorted(class_labels, key=len, reverse=True):
-        if cls.lower() in lower:
+        if cls.lower() in txt:
             return cls
     return resp_text.strip().split()[0] if resp_text else ""
 
 # ─── MAIN EVALUATION LOOP ────────────────────────────────────────────────────────
 for dataset in os.listdir(DATA_ROOT):
     ds_path = os.path.join(DATA_ROOT, dataset)
-    if not os.path.isdir(ds_path):
-        continue
+    if not os.path.isdir(ds_path): continue
     print(f"\n>>> Evaluating dataset: {dataset}")
 
-    # 1) Gather class labels & load reference images
+    # load classes & reference images
     ref_dir      = os.path.join(ds_path, "REFERENCE")
     class_labels = sorted(os.listdir(ref_dir))
     ref_pils     = []
@@ -92,48 +90,45 @@ for dataset in os.listdir(DATA_ROOT):
         pil = Image.open(os.path.join(ref_dir, cls, fp)).convert("RGB")
         ref_pils.append(pil)
 
-    # Pre-process all reference images at once if one-shot
+    # preprocess reference images into a batch tensor
     if SHOT > 0:
-        ref_tensors = process_images(ref_pils, image_processor, model.config)
+        ref_tensors = process_images(ref_pils, image_processor, model.config)  # Tensor [N, C, H, W]
 
-    # 2) Build a single prompt template
     prompt_template = build_shot_prompt(class_labels)
-
     y_true, y_pred = [], []
     test_root = os.path.join(ds_path, "TEST")
 
-    # 3) Loop over every test image
     for cls in class_labels:
         cls_folder = os.path.join(test_root, cls)
         for fname in os.listdir(cls_folder):
             img_path = os.path.join(cls_folder, fname)
             print(f"Classifying: {dataset}/{cls}/{fname}")
 
-            # load & process test image
+            # load & preprocess test image
             pil_test = Image.open(img_path).convert("RGB")
             test_tensor = process_images([pil_test], image_processor, model.config)[0]
 
-            # assemble image batch
+            # assemble image batch correctly
             if SHOT > 0:
-                # ref_tensors is list of tensors; append test at end
-                imgs = torch.stack(ref_tensors + [test_tensor])
+                test_batch = test_tensor.unsqueeze(0)                   # [1, C, H, W]
+                imgs = torch.cat([ref_tensors, test_batch], dim=0)      # [N+1, C, H, W]
             else:
-                imgs = test_tensor.unsqueeze(0)  # single-image batch
+                imgs = test_tensor.unsqueeze(0)                         # [1, C, H, W]
 
-            # build & display prompt summary
+            # build & display prompt
             prompt = prompt_template
             print("--- Prompt ---")
             print(summarize_prompt(prompt))
             print("--- End Prompt ---")
 
-            # instantiate & populate conversation
+            # conversation
             conv = conv_template.copy()
             roles = conv.roles
             conv.append_message(roles[0], prompt)
             conv.append_message(roles[1], None)
             full_prompt = conv.get_prompt()
 
-            # tokenize prompt with image tokens
+            # tokenize with image token
             input_ids = tokenizer_image_token(
                 full_prompt,
                 tokenizer,
@@ -141,7 +136,7 @@ for dataset in os.listdir(DATA_ROOT):
                 return_tensors="pt"
             ).unsqueeze(0).cuda()
 
-            # generate response
+            # generate
             with torch.inference_mode():
                 output_ids = model.generate(
                     input_ids,
@@ -151,8 +146,8 @@ for dataset in os.listdir(DATA_ROOT):
                     max_new_tokens=256
                 )
             resp_text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-
-            # extract and record prediction
+            print(resp_text)
+            # extract & record
             pred    = extract_prediction(resp_text, class_labels)
             correct = (pred == cls)
             print(f"Model output: '{resp_text}'")
@@ -162,13 +157,11 @@ for dataset in os.listdir(DATA_ROOT):
             y_pred.append(pred)
             time.sleep(0.1)
 
-    # 4) Compute and save metrics
-    rpt = classification_report(
-        y_true, y_pred,
-        labels=class_labels,
-        output_dict=True,
-        zero_division=0
-    )
+    # compute metrics
+    rpt = classification_report(y_true, y_pred,
+                                labels=class_labels,
+                                output_dict=True,
+                                zero_division=0)
     df = pd.DataFrame(rpt).T
     df.loc["accuracy", :] = [accuracy_score(y_true, y_pred), None, None, len(y_true)]
 
@@ -181,7 +174,6 @@ for dataset in os.listdir(DATA_ROOT):
         fp[cls] = int(cm[:, i].sum() - cm[i, i])
         fn[cls] = int(cm[i, :].sum() - cm[i, i])
         tn[cls] = n - tp[cls] - fp[cls] - fn[cls]
-
     df["tp"], df["fp"], df["fn"], df["tn"] = (
         pd.Series(tp), pd.Series(fp), pd.Series(fn), pd.Series(tn)
     )
@@ -190,5 +182,5 @@ for dataset in os.listdir(DATA_ROOT):
     )
 
     out_csv = os.path.join(OUTPUT_DIR, f"metrics_{dataset}_llavamed.csv")
-    df.to_csv(out_csv)
+    df.to_csv(out_csv, index=True)
     print(f"→ Saved metrics to {out_csv}")
